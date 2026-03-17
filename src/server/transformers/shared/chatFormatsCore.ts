@@ -7,6 +7,7 @@ import {
   extractInlineThinkTags,
   type ThinkTagParserState,
 } from './thinkTagParser.js';
+import { cacheThoughtSignature } from '../../services/thoughtSignatureCache.js';
 
 export type DownstreamFormat = 'openai' | 'claude';
 
@@ -68,6 +69,7 @@ export type NormalizedFinalResponse = {
     id: string;
     name: string;
     arguments: string;
+    metadata?: Record<string, unknown>;
   }>;
 };
 
@@ -88,6 +90,17 @@ function isNonEmptyString(value: unknown): value is string {
 
 function pickFiniteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+export function extractThoughtSignature(item: unknown): string {
+  if (!item || typeof item !== 'object') return '';
+  const record = item as Record<string, unknown>;
+  return (
+    (typeof record.thought_signature === 'string' ? record.thought_signature : '')
+    || (typeof record.thoughtSignature === 'string' ? record.thoughtSignature : '')
+    || (typeof record.reasoning_signature === 'string' ? record.reasoning_signature : '')
+    || (typeof record.signature === 'string' ? record.signature : '')
+  ).trim();
 }
 
 function ensureIntegerTimestamp(value: unknown, fallback: number): number {
@@ -372,13 +385,13 @@ function parseJsonLike(value: string): unknown {
   }
 }
 
-function collectToolCallsFromOpenAiChoice(choice: any): Array<{ id: string; name: string; arguments: string }> {
+function collectToolCallsFromOpenAiChoice(choice: any): Array<{ id: string; name: string; arguments: string; metadata?: Record<string, unknown> }> {
   const message = isRecord(choice?.message) ? choice.message : {};
   const rawToolCalls = Array.isArray((message as any).tool_calls)
     ? (message as any).tool_calls
     : (Array.isArray(choice?.tool_calls) ? choice.tool_calls : []);
 
-  const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+  const toolCalls: Array<{ id: string; name: string; arguments: string; metadata?: Record<string, unknown> }> = [];
   for (let index = 0; index < rawToolCalls.length; index += 1) {
     const rawToolCall = rawToolCalls[index];
     if (!isRecord(rawToolCall)) continue;
@@ -398,19 +411,25 @@ function collectToolCallsFromOpenAiChoice(choice: any): Array<{ id: string; name
         ? fn.arguments
         : stringifyUnknownValue(fn.arguments ?? rawToolCall.arguments)
     );
+
+    const metadata: Record<string, unknown> = {};
+    const signature = extractThoughtSignature(rawToolCall);
+    if (signature) metadata.thought_signature = signature;
+
     toolCalls.push({
       id,
       name,
       arguments: argumentsText,
+      metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
     });
   }
 
   return toolCalls;
 }
 
-function collectToolCallsFromClaudeContent(content: unknown): Array<{ id: string; name: string; arguments: string }> {
+function collectToolCallsFromClaudeContent(content: unknown): Array<{ id: string; name: string; arguments: string; metadata?: Record<string, unknown> }> {
   const contentItems = Array.isArray(content) ? content : [];
-  const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+  const toolCalls: Array<{ id: string; name: string; arguments: string; metadata?: Record<string, unknown> }> = [];
 
   for (let index = 0; index < contentItems.length; index += 1) {
     const block = contentItems[index];
@@ -424,19 +443,24 @@ function collectToolCallsFromClaudeContent(content: unknown): Array<{ id: string
     );
     const name = typeof block.name === 'string' ? block.name.trim() : '';
     const argumentsText = stringifyUnknownValue(block.input);
+    const metadata: Record<string, unknown> = {};
+    const signature = extractThoughtSignature(block);
+    if (signature) metadata.thought_signature = signature;
+
     toolCalls.push({
       id,
       name,
       arguments: argumentsText,
+      metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
     });
   }
 
   return toolCalls;
 }
 
-function collectToolCallsFromResponsesPayload(payload: Record<string, unknown>): Array<{ id: string; name: string; arguments: string }> {
+function collectToolCallsFromResponsesPayload(payload: Record<string, unknown>): Array<{ id: string; name: string; arguments: string; metadata?: Record<string, unknown> }> {
   const output = Array.isArray(payload.output) ? payload.output : [];
-  const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+  const toolCalls: Array<{ id: string; name: string; arguments: string; metadata?: Record<string, unknown> }> = [];
 
   for (let index = 0; index < output.length; index += 1) {
     const item = output[index];
@@ -454,10 +478,18 @@ function collectToolCallsFromResponsesPayload(payload: Record<string, unknown>):
         ? item.arguments
         : stringifyUnknownValue(item.arguments)
     );
+    const metadata: Record<string, unknown> = {};
+    if (isRecord(item.metadata)) {
+      Object.assign(metadata, item.metadata);
+    }
+    const signature = extractThoughtSignature(item);
+    if (signature) metadata.thought_signature = signature;
+
     toolCalls.push({
       id,
       name,
       arguments: argumentsText,
+      metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
     });
   }
 
@@ -738,7 +770,32 @@ export function normalizeUpstreamFinalResponse(
 
   if (isRecord(payload) && Array.isArray(payload.candidates)) {
     const candidate = payload.candidates[0] || {};
-    const parsedCandidate = extractTextAndReasoning(candidate?.content?.parts || candidate?.content);
+    const content = candidate?.content || {};
+    const parts = Array.isArray(content.parts) ? content.parts : [];
+    const parsedCandidate = extractTextAndReasoning(parts);
+    const toolCalls: Array<{ id: string; name: string; arguments: string; metadata?: Record<string, unknown> }> = [];
+
+    for (let index = 0; index < parts.length; index += 1) {
+      const part = parts[index];
+      if (!isRecord(part)) continue;
+      if (isRecord(part.functionCall)) {
+        const fn = part.functionCall;
+        const id = isNonEmptyString(fn.id) ? fn.id : `call_${index}`;
+        const name = isNonEmptyString(fn.name) ? fn.name : '';
+        const args = stringifyUnknownValue(fn.args ?? fn.arguments);
+        const metadata: Record<string, unknown> = {};
+        const signature = extractThoughtSignature(part);
+        if (signature) metadata.thought_signature = signature;
+
+        toolCalls.push({
+          id,
+          name,
+          arguments: args,
+          metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+        });
+      }
+    }
+
     return {
       id: isNonEmptyString((payload as any).responseId) ? (payload as any).responseId : fallbackId,
       model: isNonEmptyString((payload as any).modelVersion)
@@ -748,7 +805,7 @@ export function normalizeUpstreamFinalResponse(
       content: parsedCandidate.content || fallbackText,
       reasoningContent: parsedCandidate.reasoning,
       finishReason: normalizeStopReason(candidate?.finishReason || (payload as any).finishReason) || 'stop',
-      toolCalls: [],
+      toolCalls,
     };
   }
 
@@ -1422,17 +1479,29 @@ export function serializeStreamDone(
 }
 
 function toOpenAiToolCalls(
-  toolCalls: Array<{ id: string; name: string; arguments: string }>,
+  toolCalls: Array<{ id: string; name: string; arguments: string; metadata?: Record<string, unknown> }>,
 ): Array<Record<string, unknown>> {
-  return toolCalls.map((toolCall, index) => ({
-    index,
-    id: toolCall.id || `call_${index}`,
-    type: 'function',
-    function: {
-      name: toolCall.name || '',
-      arguments: toolCall.arguments || '',
-    },
-  }));
+  return toolCalls.map((toolCall, index) => {
+    const next: Record<string, unknown> = {
+      index,
+      id: toolCall.id || `call_${index}`,
+      type: 'function',
+      function: {
+        name: toolCall.name || '',
+        arguments: toolCall.arguments || '',
+      },
+    };
+    if (toolCall.metadata) {
+      if (typeof toolCall.metadata.thought_signature === 'string' && toolCall.metadata.thought_signature) {
+        next.thought_signature = toolCall.metadata.thought_signature;
+        cacheThoughtSignature(toolCall.id || `call_${index}`, toolCall.metadata.thought_signature);
+      }
+      if (typeof toolCall.metadata.reasoning_signature === 'string' && toolCall.metadata.reasoning_signature) {
+        next.reasoning_signature = toolCall.metadata.reasoning_signature;
+      }
+    }
+    return next;
+  });
 }
 
 export function serializeFinalResponse(

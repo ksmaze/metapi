@@ -8,6 +8,8 @@ import {
   convertOpenAiBodyToAnthropicMessagesBody,
   sanitizeAnthropicMessagesBody,
 } from '../../transformers/anthropic/messages/conversion.js';
+import { extractThoughtSignature } from '../../transformers/shared/chatFormatsCore.js';
+import { getCachedThoughtSignature } from '../../services/thoughtSignatureCache.js';
 export {
   buildMinimalJsonHeadersForCompatibility,
   isEndpointDispatchDeniedError,
@@ -503,9 +505,28 @@ export function buildUpstreamEndpointRequest(input: {
     commonHeaders.Authorization = `Bearer ${input.tokenValue}`;
   }
 
+  const normalizeGeminiOpenAiMessages = (messages: unknown): any[] | undefined => {
+    if (!isGeminiUpstream || !Array.isArray(messages)) return messages as any[] | undefined;
+    return messages.map((msg) => {
+      if (!isRecord(msg) || !Array.isArray(msg.tool_calls)) return msg;
+      return {
+        ...msg,
+        tool_calls: msg.tool_calls.map((tc) => {
+          if (!isRecord(tc)) return tc;
+          const signature = extractThoughtSignature(tc)
+            || (typeof tc.id === 'string' ? getCachedThoughtSignature(tc.id) : undefined)
+            || '';
+          return signature ? { ...tc, thought_signature: signature } : tc;
+        }),
+      };
+    });
+  };
   const stripGeminiUnsupportedFields = (body: Record<string, unknown>) => {
     const next = { ...body };
     if (isGeminiUpstream) {
+      if (next.messages !== undefined) {
+        next.messages = normalizeGeminiOpenAiMessages(next.messages);
+      }
       for (const key of [
         'frequency_penalty',
         'presence_penalty',

@@ -3,6 +3,7 @@ import {
   geminiThinkingConfigToReasoning,
   resolveGeminiThinkingConfigFromRequest,
 } from './convert.js';
+import { extractThoughtSignature } from '../../shared/chatFormatsCore.js';
 
 function isRecord(value: unknown): value is GeminiRecord {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -27,7 +28,19 @@ function cloneContents(value: unknown): unknown[] | undefined {
     .map((item) => {
       const next: GeminiRecord = { ...item };
       if (Array.isArray(item.parts)) {
-        next.parts = item.parts.map((part) => (isRecord(part) ? cloneJsonValue(part) : part));
+        next.parts = item.parts.map((part) => {
+          if (!isRecord(part)) return part;
+          const nextPart = cloneJsonValue(part) as GeminiRecord;
+
+          const signature = extractThoughtSignature(part);
+          if (signature) {
+            nextPart.thoughtSignature = signature;
+            delete nextPart.thought_signature;
+            delete nextPart.reasoning_signature;
+          }
+
+          return nextPart;
+        });
       }
       return next;
     });

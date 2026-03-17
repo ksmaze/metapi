@@ -185,9 +185,13 @@ export function applyGeminiGenerateContentAggregate(
 ): GeminiGenerateContentAggregateState {
   for (const part of collectPartsFromPayload(payload)) {
     appendPart(state.parts, part);
-    if (typeof part.thoughtSignature === 'string' && part.thoughtSignature.trim()) {
-      if (!state.thoughtSignatures.includes(part.thoughtSignature)) {
-        state.thoughtSignatures.push(part.thoughtSignature);
+    const signature = (
+      (typeof part.thoughtSignature === 'string' ? part.thoughtSignature : '')
+      || (typeof part.thought_signature === 'string' ? part.thought_signature : '')
+    ).trim();
+    if (signature) {
+      if (!state.thoughtSignatures.includes(signature)) {
+        state.thoughtSignatures.push(signature);
       }
     }
   }

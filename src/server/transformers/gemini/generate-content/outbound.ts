@@ -7,6 +7,7 @@ import {
   toTransformerMetadataRecord,
   type TransformerMetadata,
 } from '../../shared/normalized.js';
+import { extractThoughtSignature } from '../../shared/chatFormatsCore.js';
 
 function normalizeBaseUrl(baseUrl: string): string {
   return (baseUrl || '').replace(/\/+$/, '');
@@ -91,6 +92,23 @@ function buildUsageMetadata(state: GeminiGenerateContentAggregateState): GeminiR
   return Object.keys(next).length > 0 ? next : undefined;
 }
 
+function normalizeParts(parts: unknown[]): any[] {
+  return parts.map((part) => {
+    if (!isRecord(part)) return part;
+    const signature = extractThoughtSignature(part);
+
+    if (signature) {
+      const nextPart = { ...part };
+      nextPart.thoughtSignature = signature;
+      delete nextPart.thought_signature;
+      delete nextPart.reasoning_signature;
+      return nextPart;
+    }
+
+    return part;
+  });
+}
+
 function buildCandidates(state: GeminiGenerateContentAggregateState): GeminiRecord[] {
   if (state.candidates.length > 0) {
     return state.candidates
@@ -102,7 +120,7 @@ function buildCandidates(state: GeminiGenerateContentAggregateState): GeminiReco
           finishReason: candidate.finishReason || 'STOP',
           content: {
             role: 'model',
-            parts: candidate.parts,
+            parts: normalizeParts(candidate.parts),
           },
         };
         if (candidate.groundingMetadata) next.groundingMetadata = candidate.groundingMetadata;
@@ -116,7 +134,7 @@ function buildCandidates(state: GeminiGenerateContentAggregateState): GeminiReco
     finishReason: state.finishReason || 'STOP',
     content: {
       role: 'model',
-      parts: state.parts,
+      parts: normalizeParts(state.parts),
     },
   };
   if (state.groundingMetadata.length > 0) {
@@ -160,12 +178,14 @@ function extractOrderedThoughtSignatures(
 
   for (const candidate of candidates) {
     for (const part of candidate.parts) {
-      if (!isRecord(part) || typeof part.thoughtSignature !== 'string' || !part.thoughtSignature.trim()) {
-        continue;
-      }
-      ordered.add(part.thoughtSignature);
+      if (!isRecord(part)) continue;
+      const signature = extractThoughtSignature(part);
+
+      if (!signature) continue;
+
+      ordered.add(signature);
       if (part.thought === true) {
-        preferredThoughts.add(part.thoughtSignature);
+        preferredThoughts.add(signature);
       }
     }
   }
